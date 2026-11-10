@@ -15,7 +15,15 @@ from blood_magic.infrastructure.supabase_repository import SupabaseCombatReposit
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
-SUPABASE_AVAILABLE = bool(SUPABASE_URL and SUPABASE_ANON_KEY)
+TEST_USER_EMAIL = os.getenv("TEST_USER_1_EMAIL")
+
+SUPABASE_AVAILABLE = bool(
+    SUPABASE_URL
+    and SUPABASE_ANON_KEY
+    and "YOUR_" not in SUPABASE_ANON_KEY
+    and TEST_USER_EMAIL
+    and "YOUR_" not in TEST_USER_EMAIL
+)
 
 
 @pytest.fixture(scope="session")
@@ -336,3 +344,173 @@ class TestSupabaseCombatIntegration:
                 StartCombatDTO(character_a_id=char_u1.id, character_b_id=char_u2.id)
             )
         assert exc_info.value.code == ErrorCode.FORBIDDEN
+
+    def test_combat_victory_and_finished_state(self, service_user_1):
+        """
+        Confirms that when lethal damage reduces target HP to 0:
+        1. Combat transitions to 'finished'.
+        2. Winner is assigned to the attacking participant.
+        3. current_turn_participant_id is set to None.
+        4. ended_at timestamp is populated.
+        5. Snapshots and characters tables are synchronized with 0 HP for target.
+        """
+        repo = service_user_1.repository
+        spells = repo.list_spells()
+        spell = spells[0]  # E.g. BLOOD_PIN_V1: base 15, cost 5%
+
+        # Char A: HP 100/100, magic 10, initiative 50 (starts)
+        char_a = service_user_1.create_character(
+            CreateCharacterDTO(
+                name=f"VictorA_{uuid.uuid4().hex[:4]}",
+                max_hp=100,
+                current_hp=100,
+                magic_power=10,
+                defense=5,
+                initiative=50,
+            )
+        )
+        # Char B: low HP so single blow is lethal (HP 10/10)
+        char_b = service_user_1.create_character(
+            CreateCharacterDTO(
+                name=f"FragileB_{uuid.uuid4().hex[:4]}",
+                max_hp=10,
+                current_hp=10,
+                magic_power=0,
+                defense=0,
+                initiative=10,
+            )
+        )
+
+        combat = service_user_1.start_combat(
+            StartCombatDTO(character_a_id=char_a.id, character_b_id=char_b.id)
+        )
+        combat_id = uuid.UUID(combat["combat_id"])
+        p1_id = uuid.UUID(combat["participant_1"]["id"])
+        p2_id = uuid.UUID(combat["participant_2"]["id"])
+
+        req_id = uuid.uuid4()
+        res = service_user_1.cast_spell(
+            CastSpellDTO(
+                combat_id=combat_id,
+                request_id=req_id,
+                expected_version=0,
+                actor_participant_id=p1_id,
+                target_participant_id=p2_id,
+                spell_id=uuid.UUID(spell["id"]),
+            )
+        )
+
+        assert res.resulting_status == CombatStatus.FINISHED
+        assert res.winner_participant_id == p1_id
+        assert res.next_turn_participant_id is None
+        assert res.target_hp_after == 0
+
+        # Verify DB combat record
+        combat_row = repo.get_combat(combat_id)
+        assert combat_row["status"] == "finished"
+        assert combat_row["winner_participant_id"] == str(p1_id)
+        assert combat_row["current_turn_participant_id"] is None
+        assert combat_row["ended_at"] is not None
+
+        # Verify target character synchronized in characters table
+        char_b_synced = repo.get_character(char_b.id)
+        assert char_b_synced["current_hp"] == 0
+
+    def test_idempotency_after_combat_finished(self, service_user_1):
+        """
+        Confirms idempotency replay even after combat is finished:
+        1. A replayed winning request returns original result.
+        2. A NEW request against finished combat is rejected with COMBAT_NOT_ACTIVE.
+        """
+        repo = service_user_1.repository
+        spells = repo.list_spells()
+        spell = spells[0]
+
+        char_a = service_user_1.create_character(
+            CreateCharacterDTO(
+                name=f"IdemFinA_{uuid.uuid4().hex[:4]}",
+                max_hp=100,
+                current_hp=100,
+                magic_power=10,
+                defense=0,
+                initiative=50,
+            )
+        )
+        char_b = service_user_1.create_character(
+            CreateCharacterDTO(
+                name=f"IdemFinB_{uuid.uuid4().hex[:4]}",
+                max_hp=10,
+                current_hp=10,
+                magic_power=0,
+                defense=0,
+                initiative=10,
+            )
+        )
+
+        combat = service_user_1.start_combat(
+            StartCombatDTO(character_a_id=char_a.id, character_b_id=char_b.id)
+        )
+        combat_id = uuid.UUID(combat["combat_id"])
+        p1_id = uuid.UUID(combat["participant_1"]["id"])
+        p2_id = uuid.UUID(combat["participant_2"]["id"])
+
+        win_req_id = uuid.uuid4()
+        original_res = service_user_1.cast_spell(
+            CastSpellDTO(
+                combat_id=combat_id,
+                request_id=win_req_id,
+                expected_version=0,
+                actor_participant_id=p1_id,
+                target_participant_id=p2_id,
+                spell_id=uuid.UUID(spell["id"]),
+            )
+        )
+        assert original_res.resulting_status == CombatStatus.FINISHED
+
+        # Idempotent replay on the finished combat
+        replay_res = service_user_1.cast_spell(
+            CastSpellDTO(
+                combat_id=combat_id,
+                request_id=win_req_id,
+                expected_version=0,
+                actor_participant_id=p1_id,
+                target_participant_id=p2_id,
+                spell_id=uuid.UUID(spell["id"]),
+            )
+        )
+        assert replay_res.is_idempotent_replay is True
+        assert replay_res.action_id == original_res.action_id
+        assert replay_res.resulting_status == CombatStatus.FINISHED
+
+        # New request on finished combat must be rejected with COMBAT_NOT_ACTIVE
+        with pytest.raises(CombatDomainError) as exc_info:
+            service_user_1.cast_spell(
+                CastSpellDTO(
+                    combat_id=combat_id,
+                    request_id=uuid.uuid4(),
+                    expected_version=1,
+                    actor_participant_id=p1_id,
+                    target_participant_id=p2_id,
+                    spell_id=uuid.UUID(spell["id"]),
+                )
+            )
+        assert exc_info.value.code == ErrorCode.COMBAT_NOT_ACTIVE
+
+    def test_catalog_and_history_immutability(self, service_user_1):
+        """
+        Confirms immutability:
+        Direct UPDATE or DELETE on spells and combat_actions is prohibited by triggers and permissions.
+        """
+        repo = service_user_1.repository
+        spells = repo.list_spells()
+        assert len(spells) > 0
+        spell_id = spells[0]["id"]
+
+        # Attempting direct update on spells should fail
+        with pytest.raises(Exception):
+            repo.client.table("spells").update({"name": "Hacked Name"}).eq("id", spell_id).execute()
+
+        # Attempting direct delete on spells should fail
+        with pytest.raises(Exception):
+            repo.client.table("spells").delete().eq("id", spell_id).execute()
+

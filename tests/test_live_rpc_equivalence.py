@@ -14,7 +14,15 @@ from blood_magic.infrastructure.supabase_repository import SupabaseCombatReposit
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
-SUPABASE_AVAILABLE = bool(SUPABASE_URL and SUPABASE_ANON_KEY)
+TEST_USER_EMAIL = os.getenv("TEST_USER_1_EMAIL")
+
+SUPABASE_AVAILABLE = bool(
+    SUPABASE_URL
+    and SUPABASE_ANON_KEY
+    and "YOUR_" not in SUPABASE_ANON_KEY
+    and TEST_USER_EMAIL
+    and "YOUR_" not in TEST_USER_EMAIL
+)
 
 
 @pytest.fixture(scope="session")
@@ -56,19 +64,20 @@ class TestLiveRpcPureMathEquivalence:
     """
 
     @pytest.mark.parametrize(
-        "desc, caster_max_hp, caster_cur_hp, caster_pwr, target_hp, target_def, cost_pct, base_dmg, mult_pct",
+        "desc, spell_code, caster_max_hp, caster_cur_hp, caster_pwr, target_hp, target_def, cost_pct, base_dmg, mult_pct",
         [
-            ("Exemplo obrigatorio", 100, 50, 5, 100, 4, 12, 8, 150),
-            ("Arredondamento teto", 95, 60, 10, 80, 5, 10, 20, 100),
-            ("Defesa reduz dano a zero", 100, 70, 0, 90, 500, 10, 5, 50),
-            ("Dano maior que HP restante (capping)", 100, 80, 20, 15, 0, 15, 50, 200),
-            ("Valores maximos permitidos", 1000000, 800000, 500000, 900000, 100000, 10, 200000, 5000),
+            ("Exemplo obrigatorio", "HAEMATIC_SPEAR_V1", 100, 50, 5, 100, 4, 12, 8, 150),
+            ("Arredondamento teto", "TEST_CEIL_ROUND_V1", 95, 60, 10, 80, 5, 10, 20, 100),
+            ("Defesa reduz dano a zero", "TEST_ZERO_DMG_V1", 100, 70, 0, 90, 500, 10, 5, 50),
+            ("Dano maior que HP restante (capping)", "TEST_OVERKILL_V1", 100, 80, 20, 15, 0, 15, 50, 200),
+            ("Valores maximos permitidos", "TEST_MAX_VALS_V1", 1000000, 800000, 500000, 900000, 100000, 10, 200000, 5000),
         ],
     )
     def test_live_rpc_matches_python_pure_math(
         self,
         combat_service,
         desc,
+        spell_code,
         caster_max_hp,
         caster_cur_hp,
         caster_pwr,
@@ -80,20 +89,29 @@ class TestLiveRpcPureMathEquivalence:
     ):
         repo = combat_service.repository
 
-        # 1. Obter ou criar feitiço com os atributos especificados
-        code = f"TEST_SP_{uuid.uuid4().hex[:8]}"
-        spell_res = (
-            repo.client.table("spells")
-            .insert({
-                "code": code,
-                "name": f"Spell {desc}",
-                "hp_cost_percent": cost_pct,
-                "base_damage": base_dmg,
-                "blood_multiplier_percent": mult_pct,
-            })
-            .execute()
-        )
-        spell_id = uuid.UUID(spell_res.data[0]["id"])
+        # 1. Obter feitiço pré-cadastrado no catálogo imutável
+        spells_res = repo.client.table("spells").select("*").eq("code", spell_code).execute()
+        if not spells_res.data:
+            # Fallback: se TEST_DATABASE_URL estiver disponível, inserir como admin
+            test_db_url = os.getenv("TEST_DATABASE_URL")
+            if test_db_url and "YOUR_" not in test_db_url:
+                try:
+                    import psycopg
+                    with psycopg.connect(test_db_url, autocommit=True) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                INSERT INTO public.spells (code, name, hp_cost_percent, base_damage, blood_multiplier_percent)
+                                VALUES (%s, %s, %s, %s, %s)
+                                ON CONFLICT (code) DO NOTHING;
+                            """, (spell_code, f"Spell {desc}", cost_pct, base_dmg, mult_pct))
+                    spells_res = repo.client.table("spells").select("*").eq("code", spell_code).execute()
+                except Exception:
+                    pass
+
+        if not spells_res.data:
+            pytest.skip(f"Feitiço {spell_code} não encontrado no catálogo. Execute a migração 003_seed_spells.sql.")
+
+        spell_id = uuid.UUID(spells_res.data[0]["id"])
 
         # 2. Criar personagens com os atributos conhecidos
         char_a = combat_service.create_character(

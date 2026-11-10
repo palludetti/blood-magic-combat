@@ -80,18 +80,25 @@ Toda a matemática opera exclusivamente com inteiros e arredondamento superior s
 
 ---
 
-## 🔒 Auditoria de Concorrência e Bloqueios
+## 🔒 Ordem Global de Bloqueios e Auditoria de Concorrência
 
-Para eliminar deadlocks e condições de corrida entre requisições concorrentes, foi estabelecida uma **hierarquia estrita de bloqueios**:
+Para mitigar deadlocks e assegurar isolamento entre requisições concorrentes, foi estabelecida uma **hierarquia global e consistente de bloqueios**:
 
-| Operação | Ordem de Bloqueio (`FOR UPDATE`) | Justificativa |
+| Operação | Ordem de Bloqueio (`FOR UPDATE`) | Justificativa de Isolamento |
 |---|---|---|
-| **`fn_start_combat`** | `characters(id)` (menor UUID $\to$ maior UUID) $\to$ insert `combats` $\to$ insert `combat_participants` | Ordenação lexicográfica de UUID dos personagens impede ciclo quando dois combates tentam bloquear o mesmo par simultaneamente. |
-| **`fn_cast_spell`** | `combats(id)` $\to$ `combat_participants(id)` (menor UUID $\to$ maior UUID) $\to$ `characters(id)` (menor UUID $\to$ maior UUID) | O combate é o agregado raiz e o lock imediato serializa as ações do mesmo combate. A sincronização de HP nos personagens segue a ordem lexicográfica. |
+| **`fn_start_combat`** | `characters(id)` (menor UUID $\to$ maior UUID) $\to$ insert `combats` $\to$ insert `combat_participants` | Ordenação lexicográfica de UUID dos personagens impede ciclo circular de *lock wait* quando dois combates tentam bloquear simultaneamente o mesmo par de personagens. |
+| **`fn_cast_spell`** | `combats(id)` $\to$ `combat_participants(id)` (menor UUID $\to$ maior UUID) $\to$ `characters(id)` (menor UUID $\to$ maior UUID) | O combate é a raiz do agregado e o `SELECT FOR UPDATE` serializa as ações sobre o combate. A sincronização de HP nos snapshots e nos personagens segue estritamente a ordem lexicográfica. |
 | **`fn_cancel_combat`** | `combats(id)` $\to$ `combat_participants(id)` (menor UUID $\to$ maior UUID) $\to$ `characters(id)` (menor UUID $\to$ maior UUID) | Segue rigorosamente a mesma hierarquia de `fn_cast_spell`. |
 
-**Eliminação de Ciclos com Triggers:**
-Os triggers diferidos de integridade (`trg_character_active_combat_exclusivity` e `trg_combat_status_active_exclusivity`) apenas realizam leituras agregadas no final da transação sem bloquear linhas em ordem inversa.
+### Limitações e Ressalvas Importantes
+> ⚠️ **Atenção:** A ordenação de locks por UUID reduz substancialmente o risco de deadlocks circulares entre transações concorrentes da aplicação que operam sobre os mesmos registros, mas **não elimina todos os deadlocks possíveis** no PostgreSQL. Deadlocks ainda podem ocorrer por:
+> 1. **Operações Administrativas Concorrentes:** Comandos DDL ou de manutenção (como `ALTER TABLE`, `VACUUM FULL`, `REINDEX`, criação de índices ou migrações de esquema) que adquirem travas de tabela exclusivas (`AccessExclusiveLock` / `ShareLock`) em momentos imprevisíveis.
+> 2. **Integridade Referencial em Cascata:** Verificações internas do PostgreSQL para chaves estrangeiras (`REFERENCES`) que podem requisitar travas de linha compartilhadas em tabelas pai/filho fora da ordem explícita da aplicação.
+> 3. **Disputas em Nível de Página/Índice:** Em cenários de altíssima concorrência simultânea, operações de inserção concorrente podem disputar travas em páginas físicas de índice B-Tree (*page splits*).
+> 4. **Triggers e Funções Adicionais:** Funções ou triggers de auditoria externos que acessem tabelas fora da hierarquia estipulada.
+
+**Comportamento dos Triggers de Integridade:**
+Os triggers de integridade (`trg_combat_participants_count`, `trg_character_active_combat_exclusivity` e `trg_combat_status_active_exclusivity`) foram configurados como `CONSTRAINT TRIGGER ... DEFERRABLE INITIALLY DEFERRED`. Eles realizam leituras de validação agregada no commit da transação sem impor locks exclusivos em ordem inversa.
 
 ---
 

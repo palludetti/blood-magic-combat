@@ -12,7 +12,7 @@ def get_supabase_client(
     SECURITY NOTICE: Uses anonymous / public key (anon key) with JWT auth or test user tokens.
     NEVER use or expose service_role key to clients or store in repo.
     """
-    load_dotenv()
+    load_dotenv(override=False)
 
     url = supabase_url or os.getenv("SUPABASE_URL")
     key = supabase_key or os.getenv("SUPABASE_ANON_KEY")

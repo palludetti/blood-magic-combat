@@ -22,12 +22,12 @@ def print_banner(text: str) -> None:
 
 
 def run_demo() -> None:
-    load_dotenv()
+    load_dotenv(override=False)
 
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_anon_key = os.getenv("SUPABASE_ANON_KEY")
-    test_user_email = os.getenv("DEMO_USER_EMAIL")
-    test_user_password = os.getenv("DEMO_USER_PASSWORD")
+    test_user_email = os.getenv("DEMO_USER_EMAIL") or os.getenv("TEST_USER_1_EMAIL")
+    test_user_password = os.getenv("DEMO_USER_PASSWORD") or os.getenv("TEST_USER_1_PASSWORD")
 
     print_banner("SISTEMA DE COMBATE POR TURNOS - MAGIA DE SANGUE")
     print("Iniciando conexao com Supabase...")

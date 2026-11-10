@@ -7,7 +7,7 @@ except ImportError:
     psycopg = None
 
 TEST_DB_URL = os.getenv("TEST_DATABASE_URL")
-IS_CONFIGURED = bool(TEST_DB_URL and psycopg)
+IS_CONFIGURED = bool(TEST_DB_URL and psycopg and "YOUR_" not in TEST_DB_URL)
 
 
 @pytest.mark.skipif(not IS_CONFIGURED, reason="Exige TEST_DATABASE_URL e psycopg para consulta aos catálogos do PostgreSQL")
@@ -78,4 +78,65 @@ class TestEffectivePrivilegesCatalog:
                 assert len(rpcs) == 4
                 for rpc_name, has_exec in rpcs:
                     assert has_exec is True, f"RPC {rpc_name} sem permissão de execução para authenticated"
+
+    def test_immutability_triggers_on_spells_and_actions(self):
+        """
+        Confirma que triggers do PostgreSQL impedem qualquer UPDATE ou DELETE
+        mesmo para conexões com permissões de tabela.
+        """
+        with psycopg.connect(TEST_DB_URL, autocommit=False) as conn:
+            with conn.cursor() as cur:
+                # 1. Testar UPDATE em spells
+                with pytest.raises(Exception) as exc_info:
+                    cur.execute("UPDATE public.spells SET name = 'Mutated' WHERE code = 'BLOOD_PIN_V1';")
+                assert "Spells catalog is immutable" in str(exc_info.value)
+                conn.rollback()
+
+                # 2. Testar DELETE em spells
+                with pytest.raises(Exception) as exc_info:
+                    cur.execute("DELETE FROM public.spells WHERE code = 'BLOOD_PIN_V1';")
+                assert "Spells catalog is immutable" in str(exc_info.value)
+                conn.rollback()
+
+    def test_exactly_two_participants_deferred_trigger(self):
+        """
+        Confirma que o trigger diferido trg_combat_participants_count
+        rejeita transação que encerra com número de participantes diferente de 2.
+        """
+        with psycopg.connect(TEST_DB_URL, autocommit=False) as conn:
+            with conn.cursor() as cur:
+                # Obter um owner válido
+                cur.execute("SELECT id FROM auth.users LIMIT 1;")
+                row = cur.fetchone()
+                if not row:
+                    pytest.skip("Nenhum usuário em auth.users para teste de integridade")
+                owner_id = row[0]
+
+                # Criar 1 personagem de teste
+                cur.execute("""
+                    INSERT INTO public.characters (owner_id, name, max_hp, current_hp, magic_power, defense, initiative)
+                    VALUES (%s, 'SoloChar', 100, 100, 10, 5, 20)
+                    RETURNING id;
+                """, (owner_id,))
+                char_id = cur.fetchone()[0]
+
+                # Criar combate e tentar inserir apenas 1 participante
+                cur.execute("""
+                    INSERT INTO public.combats (owner_id, status, turn_number, version)
+                    VALUES (%s, 'active', 1, 0)
+                    RETURNING id;
+                """, (owner_id,))
+                combat_id = cur.fetchone()[0]
+
+                cur.execute("""
+                    INSERT INTO public.combat_participants (combat_id, character_id, slot, max_hp, current_hp, magic_power, defense, initiative)
+                    VALUES (%s, %s, 1, 100, 100, 10, 5, 20);
+                """, (combat_id, char_id))
+
+                # Ao dar commit, o trigger diferido trg_combat_participants_count deve disparar e falhar
+                with pytest.raises(Exception) as exc_info:
+                    conn.commit()
+                assert "INVALID_PARTICIPANT" in str(exc_info.value)
+                conn.rollback()
+
 

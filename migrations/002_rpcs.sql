@@ -3,6 +3,24 @@
 -- Description: Transactional RPC functions for character creation, combat start,
 --              cast spell (with FOR UPDATE, idempotency, pure math validation),
 --              and cancellation.
+--
+-- GLOBAL LOCK ORDER & CONCURRENCY HIERARCHY:
+-- 1. fn_start_combat:
+--    Locks characters(id) in ASCENDING UUID order FOR UPDATE -> Inserts combat -> Inserts participants.
+-- 2. fn_cast_spell:
+--    Locks combats(id) FOR UPDATE (aggregate root serialization) ->
+--    Locks combat_participants(id) in ASCENDING UUID order FOR UPDATE ->
+--    Locks characters(id) in ASCENDING UUID order FOR UPDATE (HP sync).
+-- 3. fn_cancel_combat:
+--    Follows the exact same hierarchy as fn_cast_spell.
+--
+-- LIMITATIONS & CAVEATS:
+-- Ordering locks by ascending UUID prevents circular lock-wait deadlocks between
+-- concurrent application transactions touching the same pair of records.
+-- However, it does NOT eliminate all deadlocks in PostgreSQL:
+-- - Concurrent DDL / administrative operations (ALTER TABLE, VACUUM FULL, REINDEX)
+-- - Foreign key check locks acquired internally in non-application order
+-- - Concurrent B-Tree index page split locks under extreme throughput
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------

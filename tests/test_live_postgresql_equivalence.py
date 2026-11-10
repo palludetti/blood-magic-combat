@@ -8,7 +8,7 @@ from blood_magic.domain.blood_math import (
 )
 
 POSTGRES_DB_URL = os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL")
-POSTGRES_AVAILABLE = bool(POSTGRES_DB_URL)
+POSTGRES_AVAILABLE = bool(POSTGRES_DB_URL and "YOUR_" not in POSTGRES_DB_URL)
 
 try:
     import psycopg

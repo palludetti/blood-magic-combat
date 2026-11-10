@@ -200,3 +200,29 @@ class TestBloodMagicMathRules:
             )
         assert exc_info.value.code == ErrorCode.CHARACTER_DEAD
 
+    def test_maximum_allowed_values(self):
+        """
+        Verify math calculations at maximum constraint boundaries:
+        max_hp=1,000,000, magic_power=1,000,000, base_damage=1,000,000,
+        blood_multiplier=10,000% (100x), defense=1,000,000.
+        Ensures intermediate arithmetic handles large 64-bit values without precision loss or overflow.
+        """
+        res = validate_and_compute_spell_action(
+            caster_max_hp=1_000_000,
+            caster_current_hp=1_000_000,
+            caster_magic_power=1_000_000,
+            target_current_hp=1_000_000,
+            target_defense=1_000_000,
+            spell_hp_cost_percent=99,
+            spell_base_damage=1_000_000,
+            spell_blood_multiplier_percent=10_000,
+        )
+
+        assert res.hp_cost == 990_000
+        assert res.raw_damage == 101_000_000  # 1M base + 1M pwr + (990k * 10k // 100) = 101M
+        assert res.calculated_damage == 100_000_000  # 101M - 1M defense
+        assert res.effective_damage == 1_000_000  # Capped at target HP
+        assert res.actor_hp_after == 10_000
+        assert res.target_hp_after == 0
+
+

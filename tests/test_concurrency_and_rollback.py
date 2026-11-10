@@ -14,7 +14,15 @@ from blood_magic.infrastructure.supabase_repository import SupabaseCombatReposit
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
-SUPABASE_AVAILABLE = bool(SUPABASE_URL and SUPABASE_ANON_KEY)
+TEST_USER_EMAIL = os.getenv("TEST_USER_1_EMAIL")
+
+SUPABASE_AVAILABLE = bool(
+    SUPABASE_URL
+    and SUPABASE_ANON_KEY
+    and "YOUR_" not in SUPABASE_ANON_KEY
+    and TEST_USER_EMAIL
+    and "YOUR_" not in TEST_USER_EMAIL
+)
 
 
 def get_fresh_authenticated_service():
