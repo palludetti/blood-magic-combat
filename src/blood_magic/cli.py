@@ -2,6 +2,12 @@ import os
 import sys
 import uuid
 from typing import Optional
+
+# Ensure 'src' is in sys.path when executed directly as a script
+_SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
 from dotenv import load_dotenv
 
 from blood_magic.infrastructure.supabase_client import get_supabase_client
@@ -32,10 +38,12 @@ def run_demo() -> None:
     print_banner("SISTEMA DE COMBATE POR TURNOS - MAGIA DE SANGUE")
     print("Iniciando conexao com Supabase...")
 
-    if not supabase_url or not supabase_anon_key:
-        print("[ERRO] SUPABASE_URL e SUPABASE_ANON_KEY devem estar definidos no ambiente (.env).")
-        print("Consulte o arquivo .env.example para mais instrucoes.")
-        sys.exit(1)
+    if not supabase_url or not supabase_anon_key or "YOUR_" in supabase_anon_key:
+        print("[CONFIGURACAO NECESSARIA]")
+        print("As variaveis SUPABASE_URL e SUPABASE_ANON_KEY contem placeholders no arquivo .env.")
+        print("Substitua pelos valores reais do seu projeto Supabase para executar a demonstracao ao vivo.")
+        print("Consulte o arquivo .env.example e o checklist do projeto.")
+        sys.exit(0)
 
     client = get_supabase_client(supabase_url, supabase_anon_key)
 
