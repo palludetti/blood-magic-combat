@@ -1,4 +1,5 @@
 import os
+import uuid
 import pytest
 
 try:
@@ -120,18 +121,19 @@ class TestEffectivePrivilegesCatalog:
                 """, (owner_id,))
                 char_id = cur.fetchone()[0]
 
-                # Criar combate e tentar inserir apenas 1 participante
+                part_id = uuid.uuid4()
+                combat_id = uuid.uuid4()
+
+                # Criar combate ativo apontando para o participante criado a seguir
                 cur.execute("""
-                    INSERT INTO public.combats (owner_id, status, turn_number, version)
-                    VALUES (%s, 'active', 1, 0)
-                    RETURNING id;
-                """, (owner_id,))
-                combat_id = cur.fetchone()[0]
+                    INSERT INTO public.combats (id, owner_id, status, turn_number, version, current_turn_participant_id)
+                    VALUES (%s, %s, 'active', 1, 0, %s);
+                """, (combat_id, owner_id, part_id))
 
                 cur.execute("""
-                    INSERT INTO public.combat_participants (combat_id, character_id, slot, max_hp, current_hp, magic_power, defense, initiative)
-                    VALUES (%s, %s, 1, 100, 100, 10, 5, 20);
-                """, (combat_id, char_id))
+                    INSERT INTO public.combat_participants (id, combat_id, character_id, slot, max_hp, current_hp, magic_power, defense, initiative)
+                    VALUES (%s, %s, %s, 1, 100, 100, 10, 5, 20);
+                """, (part_id, combat_id, char_id))
 
                 # Ao dar commit, o trigger diferido trg_combat_participants_count deve disparar e falhar
                 with pytest.raises(Exception) as exc_info:
