@@ -20,57 +20,82 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 TEST_DB_URL = os.getenv("TEST_DATABASE_URL")
 SUPABASE_PROJECT_REF = os.getenv("SUPABASE_PROJECT_REF")
+TEST_USER_1_EMAIL = os.getenv("TEST_USER_1_EMAIL")
+TEST_USER_1_PASSWORD = os.getenv("TEST_USER_1_PASSWORD")
 ENABLE_DESTRUCTIVE_ROLLBACK = os.getenv("ENABLE_DESTRUCTIVE_ROLLBACK_TEST", "false").lower() == "true"
 
 IS_CONFIGURED = bool(
     SUPABASE_URL
     and SUPABASE_ANON_KEY
     and TEST_DB_URL
+    and SUPABASE_PROJECT_REF
+    and TEST_USER_1_EMAIL
+    and TEST_USER_1_PASSWORD
     and psycopg
     and ENABLE_DESTRUCTIVE_ROLLBACK
     and "YOUR_" not in SUPABASE_ANON_KEY
     and "YOUR_" not in TEST_DB_URL
+    and "YOUR_" not in TEST_USER_1_EMAIL
 )
 
 
 def verify_test_environment_identity(conn, expected_project_ref: str | None):
     """
     Validação estrita de identidade do ambiente de testes e marcador físico no banco.
-    NÃO confia apenas em ausência de 'prod' na URL.
+    NÃO confia apenas em ausência de 'prod' na URL e NÃO cria o marcador automaticamente.
     Exige:
-      1. Identidade de projeto correspondente na URL do banco se fornecido expected_project_ref.
-      2. Verificação ou registro de marcador explícito na tabela de metadados:
-         public._test_environment_marker (is_test_environment = true).
-         Se o marcador não for confirmado, levanta exceção explícita imediatamente.
+      1. SUPABASE_PROJECT_REF explícito e presente tanto em SUPABASE_URL quanto em TEST_DATABASE_URL.
+      2. Existência prévia da tabela física public._test_environment_marker.
+      3. Registro ativo com is_test_environment = true e project_ref = expected_project_ref,
+         sem registros com is_test_environment <> true.
+    Qualquer divergência lança RuntimeError imediatamente.
     """
-    if expected_project_ref:
-        if expected_project_ref not in TEST_DB_URL and expected_project_ref not in (SUPABASE_URL or ""):
-            raise RuntimeError(
-                f"SAFETY_VIOLATION: O banco conectado não corresponde ao projeto de testes esperado '{expected_project_ref}'!"
-            )
+    if not expected_project_ref or "YOUR_" in expected_project_ref:
+        raise RuntimeError(
+            "SAFETY_VIOLATION: SUPABASE_PROJECT_REF obrigatório para validação de identidade do ambiente!"
+        )
+
+    if expected_project_ref not in (TEST_DB_URL or "") or expected_project_ref not in (SUPABASE_URL or ""):
+        raise RuntimeError(
+            f"SAFETY_VIOLATION: As URLs configuradas não correspondem ao projeto de testes esperado '{expected_project_ref}'!"
+        )
 
     with conn.cursor() as cur:
-        # Cria ou verifica tabela de segurança de marcador de ambiente
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS public._test_environment_marker (
-                id serial PRIMARY KEY,
-                is_test_environment boolean NOT NULL DEFAULT true,
-                environment_label text NOT NULL DEFAULT 'dedicated_test_instance',
-                created_at timestamptz NOT NULL DEFAULT now()
-            );
-        """)
-        cur.execute("SELECT count(*) FROM public._test_environment_marker WHERE is_test_environment = true;")
-        (count,) = cur.fetchone()
-        if count == 0:
-            cur.execute("INSERT INTO public._test_environment_marker (is_test_environment) VALUES (true);")
-
-        # Confirmar marcador
-        cur.execute("SELECT is_test_environment FROM public._test_environment_marker LIMIT 1;")
-        res = cur.fetchone()
-        if not res or res[0] is not True:
+        cur.execute("SELECT to_regclass('public._test_environment_marker');")
+        reg = cur.fetchone()
+        if not reg or reg[0] is None:
             raise RuntimeError(
-                "SAFETY_VIOLATION: Marcador de ambiente de testes inválido ou ausente! Abortando teste destrutivo."
+                "SAFETY_VIOLATION: Tabela public._test_environment_marker ausente no banco! Abortando teste destrutivo."
             )
+
+        cur.execute(
+            """
+            SELECT is_test_environment, project_ref
+            FROM public._test_environment_marker;
+            """
+        )
+        rows = cur.fetchall()
+        if not rows:
+            raise RuntimeError(
+                "SAFETY_VIOLATION: Tabela public._test_environment_marker vazia! Abortando teste destrutivo."
+            )
+
+        if any(is_test is not True or proj_ref != expected_project_ref for is_test, proj_ref in rows):
+            raise RuntimeError(
+                f"SAFETY_VIOLATION: Marcador de ambiente divergente para '{expected_project_ref}'! Abortando teste destrutivo."
+            )
+
+
+def test_environment_identity_guard_rejects_mismatch():
+    """
+    Valida que divergência de identidade de ambiente causa RuntimeError explícito.
+    Não depende de ENABLE_DESTRUCTIVE_ROLLBACK_TEST=true.
+    """
+    with pytest.raises(RuntimeError, match="SAFETY_VIOLATION"):
+        verify_test_environment_identity(None, "")
+
+    with pytest.raises(RuntimeError, match="SAFETY_VIOLATION"):
+        verify_test_environment_identity(None, "unexpected_prod_ref_000")
 
 
 @pytest.mark.skipif(
@@ -104,15 +129,12 @@ class TestTransactionalRollback:
     """
 
     def test_explicit_rollback_on_controlled_failure(self):
-        # 1. Conexão administrativa para validação de identidade e instalação do trigger
+        # 1. Conexão administrativa para validação de identidade do ambiente
         with psycopg.connect(TEST_DB_URL, autocommit=True) as pg_admin:
-            # Validação estrita da identidade e marcador
             verify_test_environment_identity(pg_admin, SUPABASE_PROJECT_REF)
 
         client = get_supabase_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-        email = os.getenv("TEST_USER_1_EMAIL", "test_mage_alpha@bloodmagic.io")
-        password = os.getenv("TEST_USER_1_PASSWORD", "AlphaBloodPassword123!")
-        client.auth.sign_in_with_password({"email": email, "password": password})
+        client.auth.sign_in_with_password({"email": TEST_USER_1_EMAIL, "password": TEST_USER_1_PASSWORD})
 
         repo = SupabaseCombatRepository(client)
         service = CombatApplicationService(repo)
@@ -123,7 +145,7 @@ class TestTransactionalRollback:
 
         char_a = service.create_character(
             CreateCharacterDTO(
-                name="RollbackHeroA",
+                name=f"RollbackHeroA_{uuid.uuid4().hex[:4]}",
                 max_hp=100,
                 current_hp=50,
                 magic_power=10,
@@ -133,7 +155,7 @@ class TestTransactionalRollback:
         )
         char_b = service.create_character(
             CreateCharacterDTO(
-                name="RollbackHeroB",
+                name=f"RollbackHeroB_{uuid.uuid4().hex[:4]}",
                 max_hp=100,
                 current_hp=50,
                 magic_power=10,
@@ -150,7 +172,7 @@ class TestTransactionalRollback:
         actor_pid = uuid.UUID(combat["participant_1"]["id"])
         target_pid = uuid.UUID(combat["participant_2"]["id"])
 
-        # 4. Capturar estado inicial completo com timestamps
+        # 4. Capturar estado inicial completo de todas as tabelas afetadas (incluindo timestamps)
         combat_before = repo.get_combat(combat_id)
         participants_before = repo.get_combat_participants(combat_id)
         char_a_before = repo.get_character(char_a.id)
@@ -158,37 +180,43 @@ class TestTransactionalRollback:
         actions_before = repo.list_combat_actions(combat_id)
 
         # 5. Instalar trigger temporário de falha controlada APÓS inserção da ação e updates de participantes/personagens
-        with psycopg.connect(TEST_DB_URL, autocommit=True) as pg_admin:
-            with pg_admin.cursor() as cur:
-                cur.execute("""
-                    CREATE OR REPLACE FUNCTION public._test_trigger_inject_failure()
-                    RETURNS trigger AS $$
-                    BEGIN
-                        RAISE EXCEPTION 'CONTROLLED_TEST_FAILURE: Injected rollback test after partial writes';
-                    END;
-                    $$ LANGUAGE plpgsql;
-
-                    DROP TRIGGER IF EXISTS trg_test_inject_failure ON public.combats;
-                    CREATE TRIGGER trg_test_inject_failure
-                    BEFORE UPDATE ON public.combats
-                    FOR EACH ROW EXECUTE FUNCTION public._test_trigger_inject_failure();
-                """)
-
-        # 6. Executar a ação de conjuração (que deve falhar no update final de combats e provocar rollback)
         cast_failed = False
         try:
-            service.cast_spell(
-                CastSpellDTO(
-                    combat_id=combat_id,
-                    request_id=uuid.uuid4(),
-                    expected_version=0,
-                    actor_participant_id=actor_pid,
-                    target_participant_id=target_pid,
-                    spell_id=uuid.UUID(spell["id"]),
+            with psycopg.connect(TEST_DB_URL, autocommit=True) as pg_admin:
+                with pg_admin.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        CREATE OR REPLACE FUNCTION public._test_trigger_inject_failure()
+                        RETURNS trigger AS $$
+                        BEGIN
+                            IF NEW.id = '{combat_id}'::uuid THEN
+                                RAISE EXCEPTION 'CONTROLLED_TEST_FAILURE: Injected rollback test after partial writes';
+                            END IF;
+                            RETURN NEW;
+                        END;
+                        $$ LANGUAGE plpgsql;
+
+                        DROP TRIGGER IF EXISTS trg_test_inject_failure ON public.combats;
+                        CREATE TRIGGER trg_test_inject_failure
+                        BEFORE UPDATE ON public.combats
+                        FOR EACH ROW EXECUTE FUNCTION public._test_trigger_inject_failure();
+                        """
+                    )
+
+            # 6. Executar a ação de conjuração (que deve falhar no update final de combats e provocar rollback)
+            try:
+                service.cast_spell(
+                    CastSpellDTO(
+                        combat_id=combat_id,
+                        request_id=uuid.uuid4(),
+                        expected_version=0,
+                        actor_participant_id=actor_pid,
+                        target_participant_id=target_pid,
+                        spell_id=uuid.UUID(spell["id"]),
+                    )
                 )
-            )
-        except CombatDomainError:
-            cast_failed = True
+            except CombatDomainError:
+                cast_failed = True
         finally:
             # 7. Remover imediatamente o trigger e a função de teste
             with psycopg.connect(TEST_DB_URL, autocommit=True) as pg_admin:
@@ -205,18 +233,8 @@ class TestTransactionalRollback:
         char_b_after = repo.get_character(char_b.id)
         actions_after = repo.list_combat_actions(combat_id)
 
-        assert combat_after["version"] == combat_before["version"]
-        assert combat_after["turn_number"] == combat_before["turn_number"]
-        assert combat_after["status"] == combat_before["status"]
-        assert combat_after["updated_at"] == combat_before["updated_at"]
-
-        for p_bef, p_aft in zip(participants_before, participants_after):
-            assert p_bef["current_hp"] == p_aft["current_hp"]
-
-        assert char_a_after["current_hp"] == char_a_before["current_hp"]
-        assert char_b_after["current_hp"] == char_b_before["current_hp"]
-        assert char_a_after["updated_at"] == char_a_before["updated_at"]
-        assert char_b_after["updated_at"] == char_b_before["updated_at"]
-
-        # Comprova que a linha inserida em combat_actions sofreu rollback total
-        assert len(actions_after) == len(actions_before)
+        assert combat_after == combat_before
+        assert participants_after == participants_before
+        assert char_a_after == char_a_before
+        assert char_b_after == char_b_before
+        assert actions_after == actions_before

@@ -15,31 +15,28 @@ from blood_magic.infrastructure.supabase_repository import SupabaseCombatReposit
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 TEST_USER_EMAIL = os.getenv("TEST_USER_1_EMAIL")
+TEST_USER_PASSWORD = os.getenv("TEST_USER_1_PASSWORD")
 
 SUPABASE_AVAILABLE = bool(
     SUPABASE_URL
     and SUPABASE_ANON_KEY
     and "YOUR_" not in SUPABASE_ANON_KEY
     and TEST_USER_EMAIL
+    and TEST_USER_PASSWORD
     and "YOUR_" not in TEST_USER_EMAIL
+    and "YOUR_" not in TEST_USER_PASSWORD
 )
 
 
 @pytest.fixture(scope="session")
 def client_user():
     if not SUPABASE_AVAILABLE:
-        pytest.skip("Supabase environment variables (SUPABASE_URL, SUPABASE_ANON_KEY) not set")
+        pytest.skip("Supabase environment variables (SUPABASE_URL, SUPABASE_ANON_KEY, TEST_USER_1_*) not set")
     client = get_supabase_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-    email = os.getenv("TEST_USER_1_EMAIL", f"mage_eval_{uuid.uuid4().hex[:6]}@test.io")
-    password = os.getenv("TEST_USER_1_PASSWORD", "BloodPass123!Secure")
     try:
-        client.auth.sign_in_with_password({"email": email, "password": password})
-    except Exception:
-        try:
-            client.auth.sign_up({"email": email, "password": password})
-            client.auth.sign_in_with_password({"email": email, "password": password})
-        except Exception as e:
-            pytest.skip(f"Failed to authenticate on Supabase: {e}")
+        client.auth.sign_in_with_password({"email": TEST_USER_EMAIL, "password": TEST_USER_PASSWORD})
+    except Exception as e:
+        pytest.skip(f"Failed to authenticate on Supabase: {e}")
     return client
 
 
@@ -248,13 +245,19 @@ class TestLiveRpcPureMathEquivalence:
         combat_row = repo.get_combat(combat_id)
         assert combat_row["version"] == 0
         assert combat_row["turn_number"] == 1
+        assert combat_row["status"] == "active"
+        participants = repo.get_combat_participants(combat_id)
+        assert next(p for p in participants if p["id"] == str(actor_pid))["current_hp"] == cur_hp_insufficient
+        assert next(p for p in participants if p["id"] == str(target_pid))["current_hp"] == 100
+        assert repo.get_character(char_a.id)["current_hp"] == cur_hp_insufficient
+        assert repo.get_character(char_b.id)["current_hp"] == 100
         actions = repo.list_combat_actions(combat_id)
         assert len(actions) == 0
 
-        # Teste 2: current_hp == cost -> LETHAL_BLOOD_COST
+        # Teste 2: current_hp == cost -> LETHAL_BLOOD_COST (usa novo oponente pois char_b segue em combate ativo)
         char_lethal = combat_service.create_character(
             CreateCharacterDTO(
-                name="CasterLethal",
+                name=f"CasterLethal_{uuid.uuid4().hex[:4]}",
                 max_hp=100,
                 current_hp=cost,
                 magic_power=10,
@@ -262,8 +265,18 @@ class TestLiveRpcPureMathEquivalence:
                 initiative=50,
             )
         )
+        char_target_lethal = combat_service.create_character(
+            CreateCharacterDTO(
+                name=f"TargetLethal_{uuid.uuid4().hex[:4]}",
+                max_hp=100,
+                current_hp=100,
+                magic_power=10,
+                defense=5,
+                initiative=10,
+            )
+        )
         combat_lethal = combat_service.start_combat(
-            StartCombatDTO(character_a_id=char_lethal.id, character_b_id=char_b.id)
+            StartCombatDTO(character_a_id=char_lethal.id, character_b_id=char_target_lethal.id)
         )
         c_lethal_id = uuid.UUID(combat_lethal["combat_id"])
         act_lethal_id = uuid.UUID(combat_lethal["participant_1"]["id"])
@@ -286,6 +299,12 @@ class TestLiveRpcPureMathEquivalence:
         combat_row = repo.get_combat(c_lethal_id)
         assert combat_row["version"] == 0
         assert combat_row["turn_number"] == 1
+        assert combat_row["status"] == "active"
+        participants_lethal = repo.get_combat_participants(c_lethal_id)
+        assert next(p for p in participants_lethal if p["id"] == str(act_lethal_id))["current_hp"] == cost
+        assert next(p for p in participants_lethal if p["id"] == str(tgt_lethal_id))["current_hp"] == 100
+        assert repo.get_character(char_lethal.id)["current_hp"] == cost
+        assert repo.get_character(char_target_lethal.id)["current_hp"] == 100
         actions = repo.list_combat_actions(c_lethal_id)
         assert len(actions) == 0
 

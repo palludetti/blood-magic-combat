@@ -105,12 +105,13 @@ Os triggers de integridade (`trg_combat_participants_count`, `trg_character_acti
 ## 🚀 Configuração e Execução
 
 ### 1. Pré-requisitos
-- Python 3.12 ou superior
-- Conta ou instância do Supabase / PostgreSQL
+- Python 3.12 (ex.: `py -3.12`)
+- Instância dedicada de testes do Supabase / PostgreSQL
 
-### 2. Instalação de Dependências
-```bash
-python -m pip install -r requirements.txt
+### 2. Ambiente Virtual e Dependências
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 ### 3. Configuração do Supabase e Migrações
@@ -119,32 +120,56 @@ python -m pip install -r requirements.txt
    - `migrations/001_initial_schema.sql` (Estrutura, Triggers diferidos, RLS, Revogações explícitas e Índices)
    - `migrations/002_rpcs.sql` (Funções transacionais atômicas `SECURITY DEFINER` e permissões restritas a `authenticated`)
    - `migrations/003_seed_spells.sql` (Catálogo imutável de feitiços de sangue)
-
-3. Configure o arquivo `.env`:
-```bash
-cp .env.example .env
+3. Para habilitar o marcador físico de ambiente de testes exigido pelo teste isolado de rollback (`tests/test_explicit_rollback.py`), execute apenas no banco de testes dedicado:
+   ```sql
+   CREATE TABLE IF NOT EXISTS public._test_environment_marker (
+       id serial PRIMARY KEY,
+       is_test_environment boolean NOT NULL DEFAULT true,
+       project_ref text NOT NULL,
+       environment_label text NOT NULL DEFAULT 'dedicated_test_instance',
+       created_at timestamptz NOT NULL DEFAULT now()
+   );
+   REVOKE ALL ON TABLE public._test_environment_marker FROM PUBLIC, anon, authenticated;
+   INSERT INTO public._test_environment_marker (is_test_environment, project_ref)
+   VALUES (true, '<YOUR_SUPABASE_PROJECT_REF>');
+   ```
+4. Configure o arquivo `.env` a partir de `.env.example` (sem versioná-lo):
+```powershell
+Copy-Item .env.example .env
 ```
-Preencha `SUPABASE_URL`, `SUPABASE_ANON_KEY` e as credenciais de usuários autenticados para os testes e a CLI:
+Preencha no `.env` os valores reais da sua instância de testes e dos dois usuários autenticados:
 ```ini
-SUPABASE_URL=https://<your-project-id>.supabase.co
-SUPABASE_ANON_KEY=eyJ...
-TEST_USER_1_EMAIL=mage1@test.io
-TEST_USER_1_PASSWORD=BloodPass123!Secure
-TEST_USER_2_EMAIL=mage2@test.io
-TEST_USER_2_PASSWORD=BloodPass456!Secure
-TEST_DATABASE_URL=postgresql://postgres:<password>@<db-host>:5432/postgres
+SUPABASE_URL=https://<your-project-ref>.supabase.co
+SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY_HERE
+SUPABASE_PROJECT_REF=<your-project-ref>
+TEST_DATABASE_URL=postgresql://postgres.<your-project-ref>:YOUR_DB_PASSWORD_HERE@aws-0-sa-east-1.pooler.supabase.com:6543/postgres
+TEST_USER_1_EMAIL=YOUR_TEST_USER_1_EMAIL_HERE
+TEST_USER_1_PASSWORD=YOUR_TEST_USER_1_PASSWORD_HERE
+TEST_USER_2_EMAIL=YOUR_TEST_USER_2_EMAIL_HERE
+TEST_USER_2_PASSWORD=YOUR_TEST_USER_2_PASSWORD_HERE
+DEMO_USER_EMAIL=YOUR_TEST_USER_1_EMAIL_HERE
+DEMO_USER_PASSWORD=YOUR_TEST_USER_1_PASSWORD_HERE
+ENABLE_DESTRUCTIVE_ROLLBACK_TEST=false
 ```
 
-> ⚠️ **Atenção à Segurança:** Nunca utilize ou versione a `service_role_key`. Todo o acesso cliente utiliza a `anon_key` com JWT do usuário logado e RLS ativo.
+> ⚠️ **Atenção à Segurança:** Nunca utilize ou versione a `service_role_key`. Todo o acesso cliente utiliza a `anon_key` com JWT do usuário logado e RLS ativo. Mantenha `ENABLE_DESTRUCTIVE_ROLLBACK_TEST=false` por padrão.
 
 ---
 
 ## 🧪 Testes Automatizados com Pytest
 
-Execute a suíte de testes:
+Execute primeiro a suíte de testes não destrutivos:
 
-```bash
-python -m pytest tests -v
+```powershell
+.\.venv\Scripts\pytest.exe -v --ignore=tests/test_explicit_rollback.py
+```
+
+Para executar o teste controlado e isolado de rollback transacional (somente em ambiente de testes validado, sem paralelismo):
+
+```powershell
+$env:ENABLE_DESTRUCTIVE_ROLLBACK_TEST="true"
+.\.venv\Scripts\pytest.exe -v tests/test_explicit_rollback.py
+Remove-Item Env:ENABLE_DESTRUCTIVE_ROLLBACK_TEST
 ```
 
 ### Categorias de Testes:
@@ -153,15 +178,21 @@ python -m pytest tests -v
    - Defesa reduzindo dano a zero sem impedir dedução integral de custo.
    - Capping de dano efetivo no HP restante do alvo.
    - Rejeição estrita de custo maior (`INSUFFICIENT_HP`) e custo igual (`LETHAL_BLOOD_COST`).
-   - Bloqueio de ação e alvo mortos.
+   - Bloqueio de ação e alvo mortos e limites máximos permitidos.
 2. **Equivalência Algorítmica Python/Expressão (`tests/test_math_expression_equivalence.py`)**:
    - Comprova paridade matemática entre as funções puras Python e a lógica espelhada do SQL.
 3. **Equivalência Real com Servidor PostgreSQL (`tests/test_live_postgresql_equivalence.py`)**:
    - Conecta a uma instância PostgreSQL via `TEST_DATABASE_URL` e executa as expressões reais `SELECT GREATEST(...)`, `SELECT LEAST(...)` comparando diretamente com Python.
-4. **Integração Real Supabase / RLS (`tests/test_supabase_integration.py`)**:
-   - Ciclo de vida completo do combate, alternância de turnos, término com vencedor, rejeição sem mutação de estado e isolamento cruzado entre dois usuários autenticados distintos.
-5. **Concorrência e Rollback (`tests/test_concurrency_and_rollback.py`)**:
-   - Disputa concorrente por versão esperada, replay idempotente simultâneo e bloqueio de criação concorrente de combate com o mesmo personagem.
+4. **Equivalência Real via RPC (`tests/test_live_rpc_equivalence.py`)**:
+   - Executa `fn_cast_spell` no Supabase comparando com `validate_and_compute_spell_action` e valida rejeições sem alterações de estado.
+5. **Privilégios Efetivos e Integridade (`tests/test_effective_privileges.py`)**:
+   - Audita `information_schema.table_privileges`, `pg_proc`, triggers de imutabilidade em `spells` e `combat_actions`, e trigger diferido de exatamente 2 participantes.
+6. **Integração Real Supabase / RLS (`tests/test_supabase_integration.py`)**:
+   - Ciclo de vida completo do combate, alternância de turnos, desempate por menor UUID, término com vencedor, cancelamento com sincronização de HP, rejeição sem mutação de estado, idempotência e isolamento cruzado entre dois usuários autenticados distintos.
+7. **Concorrência (`tests/test_concurrency_and_rollback.py`)**:
+   - Sessões independentes sincronizadas por `threading.Barrier` testando disputa por versão esperada, replay idempotente simultâneo e bloqueio de criação concorrente de combate com o mesmo personagem.
+8. **Rollback Transacional Isolado (`tests/test_explicit_rollback.py`)**:
+   - Valida trava estrita de identidade (`SUPABASE_PROJECT_REF` + `_test_environment_marker`), injeta falha controlada em trigger temporário removido em `finally` e compara todas as tabelas e timestamps antes/depois.
 
 ---
 
@@ -169,7 +200,7 @@ python -m pytest tests -v
 
 Após configurar o arquivo `.env` com as credenciais do Supabase e do usuário autenticado:
 
-```bash
-python src/blood_magic/cli.py
+```powershell
+.\.venv\Scripts\python.exe src/blood_magic/cli.py
 ```
 A demonstração simula a criação dos personagens, início de combate com snapshots de iniciativa, conjuração de turno com validação de sangue, dedução de HP, idempotência de repetição e bloqueio de suicídio.

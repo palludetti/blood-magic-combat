@@ -1,4 +1,5 @@
 import os
+import threading
 import uuid
 import pytest
 from concurrent.futures import ThreadPoolExecutor
@@ -15,22 +16,26 @@ from blood_magic.infrastructure.supabase_repository import SupabaseCombatReposit
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 TEST_USER_EMAIL = os.getenv("TEST_USER_1_EMAIL")
+TEST_USER_PASSWORD = os.getenv("TEST_USER_1_PASSWORD")
 
 SUPABASE_AVAILABLE = bool(
     SUPABASE_URL
     and SUPABASE_ANON_KEY
     and "YOUR_" not in SUPABASE_ANON_KEY
     and TEST_USER_EMAIL
+    and TEST_USER_PASSWORD
     and "YOUR_" not in TEST_USER_EMAIL
+    and "YOUR_" not in TEST_USER_PASSWORD
 )
 
 
 def get_fresh_authenticated_service():
     client = get_supabase_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-    email = os.getenv("TEST_USER_1_EMAIL", "mage1@bloodtest.io")
-    password = os.getenv("TEST_USER_1_PASSWORD", "BloodPass123!Secure")
-    client.auth.sign_in_with_password({"email": email, "password": password})
-    return CombatApplicationService(SupabaseCombatRepository(client))
+    client.auth.sign_in_with_password({"email": TEST_USER_EMAIL, "password": TEST_USER_PASSWORD})
+    repo = SupabaseCombatRepository(client)
+    # Warm up PostgREST client before barrier synchronization so threads race on the RPC itself
+    repo.list_spells()
+    return CombatApplicationService(repo)
 
 
 @pytest.mark.skipif(not SUPABASE_AVAILABLE, reason="Supabase instance not configured in environment")
@@ -40,7 +45,6 @@ class TestConcurrencyAndRollback:
     1. Two different actions competing for the same expected_version (only one succeeds).
     2. Two simultaneous calls with identical request_id (exactly one action persisted).
     3. Two concurrent combat starts with the same character (only one created).
-    4. Rollback validation on persistence failure.
     """
 
     def test_concurrent_actions_same_expected_version(self):
@@ -96,15 +100,20 @@ class TestConcurrencyAndRollback:
             spell_id=uuid.UUID(spell["id"]),
         )
 
+        barrier = threading.Barrier(2, timeout=15)
+        lock = threading.Lock()
         results = []
         errors = []
 
         def execute_cast(svc, dto):
+            barrier.wait()
             try:
                 res = svc.cast_spell(dto)
-                results.append(res)
+                with lock:
+                    results.append(res)
             except CombatDomainError as e:
-                errors.append(e)
+                with lock:
+                    errors.append(e)
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             f1 = executor.submit(execute_cast, svc1, dto1)
@@ -116,6 +125,7 @@ class TestConcurrencyAndRollback:
         assert len(results) == 1
         assert len(errors) == 1
         assert errors[0].code == ErrorCode.STALE_COMBAT_VERSION
+        assert len(repo.list_combat_actions(combat_id)) == 1
 
     def test_simultaneous_identical_request_id(self):
         svc1 = get_fresh_authenticated_service()
@@ -163,11 +173,15 @@ class TestConcurrencyAndRollback:
             spell_id=uuid.UUID(spell["id"]),
         )
 
+        barrier = threading.Barrier(2, timeout=15)
+        lock = threading.Lock()
         results = []
 
         def execute_cast(svc):
+            barrier.wait()
             res = svc.cast_spell(dto)
-            results.append(res)
+            with lock:
+                results.append(res)
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             f1 = executor.submit(execute_cast, svc1)
@@ -175,9 +189,21 @@ class TestConcurrencyAndRollback:
             f1.result()
             f2.result()
 
-        # Both calls succeed; action_id is identical
+        # Both calls succeed with identical action payload; one fresh, one idempotent replay
         assert len(results) == 2
-        assert results[0].action_id == results[1].action_id
+        r0, r1 = results[0], results[1]
+        assert r0.action_id == r1.action_id
+        assert r0.hp_cost == r1.hp_cost
+        assert r0.raw_damage == r1.raw_damage
+        assert r0.calculated_damage == r1.calculated_damage
+        assert r0.effective_damage == r1.effective_damage
+        assert r0.actor_hp_before == r1.actor_hp_before
+        assert r0.actor_hp_after == r1.actor_hp_after
+        assert r0.target_hp_before == r1.target_hp_before
+        assert r0.target_hp_after == r1.target_hp_after
+        assert r0.resulting_version == r1.resulting_version == 1
+        assert r0.resulting_status == r1.resulting_status
+        assert {r0.is_idempotent_replay, r1.is_idempotent_replay} == {False, True}
         # Exactly one persisted action row in combat_actions
         actions = repo.list_combat_actions(combat_id)
         assert len(actions) == 1
@@ -217,22 +243,30 @@ class TestConcurrencyAndRollback:
             )
         )
 
+        barrier = threading.Barrier(2, timeout=15)
+        lock = threading.Lock()
         results = []
         errors = []
 
         def start_c1():
+            barrier.wait()
             try:
                 res = svc1.start_combat(StartCombatDTO(character_a_id=char_a.id, character_b_id=char_b.id))
-                results.append(res)
+                with lock:
+                    results.append(res)
             except CombatDomainError as e:
-                errors.append(e)
+                with lock:
+                    errors.append(e)
 
         def start_c2():
+            barrier.wait()
             try:
                 res = svc2.start_combat(StartCombatDTO(character_a_id=char_a.id, character_b_id=char_c.id))
-                results.append(res)
+                with lock:
+                    results.append(res)
             except CombatDomainError as e:
-                errors.append(e)
+                with lock:
+                    errors.append(e)
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             f1 = executor.submit(start_c1)

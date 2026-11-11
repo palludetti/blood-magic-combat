@@ -99,6 +99,27 @@ class TestEffectivePrivilegesCatalog:
                 assert "Spells catalog is immutable" in str(exc_info.value)
                 conn.rollback()
 
+                # 3. Testar UPDATE e DELETE em combat_actions (impedir alteração/exclusão pelo trigger)
+                cur.execute("SELECT id FROM public.combat_actions LIMIT 1;")
+                action_row = cur.fetchone()
+                if action_row is not None:
+                    action_id = action_row[0]
+                    with pytest.raises(Exception) as exc_info:
+                        cur.execute(
+                            "UPDATE public.combat_actions SET hp_cost = 999 WHERE id = %s;",
+                            (action_id,),
+                        )
+                    assert "Combat action log is immutable" in str(exc_info.value)
+                    conn.rollback()
+
+                    with pytest.raises(Exception) as exc_info:
+                        cur.execute(
+                            "DELETE FROM public.combat_actions WHERE id = %s;",
+                            (action_id,),
+                        )
+                    assert "Combat action log is immutable" in str(exc_info.value)
+                    conn.rollback()
+
     def test_exactly_two_participants_deferred_trigger(self):
         """
         Confirma que o trigger diferido trg_combat_participants_count
