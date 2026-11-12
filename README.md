@@ -196,11 +196,18 @@ Remove-Item Env:ENABLE_DESTRUCTIVE_ROLLBACK_TEST
 
 ---
 
-## 💻 Demonstração por Terminal (CLI)
+## 💻 Demonstração e Jogo Interativo por Terminal (CLI)
 
 Após configurar o arquivo `.env` com as credenciais do Supabase e do usuário autenticado:
 
+- **Modo interativo (jogar partida completa turno a turno no terminal)**:
+```powershell
+.\.venv\Scripts\python.exe src/blood_magic/cli.py --play
+```
+Permite criar ou selecionar personagens salvos, iniciar duelos rápidos, conjurar feitiços turno a turno com prévia de custo de sangue/dano, testar replay idempotente, consultar histórico e cancelar ou retomar combates ativos.
+
+- **Demonstração automática (1 turno + idempotência + rejeição)**:
 ```powershell
 .\.venv\Scripts\python.exe src/blood_magic/cli.py
 ```
-A demonstração simula a criação dos personagens, início de combate com snapshots de iniciativa, conjuração de turno com validação de sangue, dedução de HP, idempotência de repetição e bloqueio de suicídio.
+A demonstração automática cria dois personagens, inicia o combate com snapshots de iniciativa, conjura no Turno 1 com dedução de HP, testa idempotência de repetição e valida rejeição por versão desatualizada.

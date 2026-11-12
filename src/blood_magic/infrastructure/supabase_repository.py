@@ -136,3 +136,37 @@ class SupabaseCombatRepository:
         )
         return res.data
 
+    def list_characters(self, limit: int = 50) -> List[Dict[str, Any]]:
+        res = (
+            self._client.table("characters")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return res.data
+
+    def list_active_combats(self, limit: int = 20) -> List[Dict[str, Any]]:
+        res = (
+            self._client.table("combats")
+            .select("*")
+            .eq("status", "active")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return res.data
+
+    def get_active_combat_character_ids(self) -> set[str]:
+        active = self.list_active_combats(limit=100)
+        if not active:
+            return set()
+        combat_ids = [row["id"] for row in active]
+        res = (
+            self._client.table("combat_participants")
+            .select("character_id")
+            .in_("combat_id", combat_ids)
+            .execute()
+        )
+        return {row["character_id"] for row in res.data}
+
